@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import numpy as np  # type: ignore
 import scipy.sparse as sp  # type: ignore
+from sklearn.pipeline import FeatureUnion
 from sklearn.multiclass import OneVsRestClassifier  # type: ignore
 from sklearn.feature_extraction.text import HashingVectorizer  # type: ignore
 
@@ -190,13 +191,31 @@ def get_X(doc, vec=None, vectorized=False, to_dense=False):
 
 
 def handle_vec(clf, doc, vec, vectorized, feature_names, num_features=None):
-    if isinstance(vec, HashingVectorizer) and not vectorized:
-        vec = InvertableHashingVectorizer(vec)
-        vec.fit([doc])
+    if not vectorized:
+        if isinstance(vec, HashingVectorizer):
+            vec = InvertableHashingVectorizer(vec)
+            vec.fit([doc])
+
+        elif (isinstance(vec, FeatureUnion) and
+              any(isinstance(v, HashingVectorizer)
+                  for _, v in vec.transformer_list)):
+            transformer_list = []
+            for name, _vec in vec.transformer_list:
+                if isinstance(_vec, HashingVectorizer):
+                    _vec = InvertableHashingVectorizer(
+                        _vec, always_signed=False)
+                    _vec.fit([doc])
+                transformer_list.append((name, _vec))
+            vec = FeatureUnion(
+                transformer_list,
+                transformer_weights=vec.transformer_weights,
+                n_jobs=vec.n_jobs)
+
     if is_invhashing(vec) and feature_names is None:
         # Explaining predictions does not need coef_scale,
         # because it is handled by the vectorizer.
         feature_names = vec.get_feature_names(always_signed=False)
+
     feature_names = get_feature_names(
         clf, vec, feature_names=feature_names, num_features=num_features)
     return vec, feature_names
