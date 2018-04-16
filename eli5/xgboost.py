@@ -261,7 +261,7 @@ def _prediction_feature_weights(booster, dmatrix, n_targets,
         tree_dumps = booster.get_dump(with_stats=True)
         assert len(tree_dumps) == len(leaf_ids)
     else:
-        tree_dumps = None
+        tree_dumps = range(0, len(leaf_ids))
 
     target_feature_weights = partial(
         _target_feature_weights,
