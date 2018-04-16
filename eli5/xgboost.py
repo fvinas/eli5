@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import pickle
 from __future__ import absolute_import
 from functools import partial
 import re
@@ -99,6 +100,7 @@ def explain_prediction_xgboost(
         vectorized=False,  # type: bool
         is_regression=None,  # type: bool
         missing=None,  # type: bool
+        cached_trees=None  # type: list
         ):
     """ Return an explanation of XGBoost prediction (via scikit-learn wrapper
     XGBClassifier or XGBRegressor, or via xgboost.Booster) as feature weights.
@@ -193,7 +195,7 @@ def explain_prediction_xgboost(
         names = xgb.classes_
 
     scores_weights = _prediction_feature_weights(
-        booster, dmatrix, n_targets, feature_names, xgb_feature_names)
+        booster, dmatrix, n_targets, feature_names, xgb_feature_names, cached_trees)
 
     x = get_X0(add_intercept(X))
     x = _missing_values_set_to_nan(x, missing, sparse_missing=True)
@@ -217,6 +219,11 @@ def explain_prediction_xgboost(
      )
 
 
+def cache_parsed_trees(xgb):
+    tree_dumps = xgb.get_dump(with_stats=True)
+    return _parsed_trees(tree_dumps)
+
+
 def _check_booster_args(xgb, is_regression=None):
     # type: (Any, bool) -> Tuple[Booster, bool]
     if isinstance(xgb, Booster):
@@ -233,8 +240,16 @@ def _check_booster_args(xgb, is_regression=None):
     return booster, is_regression
 
 
+def _parsed_trees(tree_dumps):
+    indexed_leaves = []
+    for text_dump in tree_dumps:
+        tree_indexed_leaves = _indexed_leafs(_parse_tree_dump(text_dump))
+        indexed_leaves.append(tree_indexed_leaves)
+    return indexed_leaves
+
+
 def _prediction_feature_weights(booster, dmatrix, n_targets,
-                                feature_names, xgb_feature_names):
+                                feature_names, xgb_feature_names, cached_trees=None):
     """ For each target, return score and numpy array with feature weights
     on this prediction, following an idea from
     http://blog.datadive.net/interpreting-random-forests/
@@ -242,12 +257,17 @@ def _prediction_feature_weights(booster, dmatrix, n_targets,
     # XGBClassifier does not have pred_leaf argument, so use booster
     leaf_ids, = booster.predict(dmatrix, pred_leaf=True)
     xgb_feature_names = {f: i for i, f in enumerate(xgb_feature_names)}
-    tree_dumps = booster.get_dump(with_stats=True)
-    assert len(tree_dumps) == len(leaf_ids)
+    
+    if cached_trees is None:
+        tree_dumps = booster.get_dump(with_stats=True)
+        assert len(tree_dumps) == len(leaf_ids)
+    else:
+        tree_dumps = None
 
     target_feature_weights = partial(
         _target_feature_weights,
-        feature_names=feature_names, xgb_feature_names=xgb_feature_names)
+        feature_names=feature_names, xgb_feature_names=xgb_feature_names,
+        cached_trees=cached_trees)
     if n_targets > 1:
         # For multiclass, XGBoost stores dumps and leaf_ids in a 1d array,
         # so we need to split them.
@@ -262,15 +282,18 @@ def _prediction_feature_weights(booster, dmatrix, n_targets,
 
 
 def _target_feature_weights(leaf_ids, tree_dumps, feature_names,
-                            xgb_feature_names):
+                            xgb_feature_names, cached_trees=None):
     feature_weights = np.zeros(len(feature_names))
     # All trees in XGBoost give equal contribution to the prediction:
     # it is equal to sum of "leaf" values in leafs
     # before applying loss-specific function
     # (e.g. logistic for "binary:logistic" loss).
     score = 0
-    for text_dump, leaf_id in zip(tree_dumps, leaf_ids):
-        leaf = _indexed_leafs(_parse_tree_dump(text_dump))[leaf_id]
+    for i, (text_dump, leaf_id) in enumerate(zip(tree_dumps, leaf_ids)):
+        if cached_trees is None:
+            leaf = _indexed_leafs(_parse_tree_dump(text_dump))[leaf_id]
+        else:
+            leaf = cached_trees[i][leaf_id]
         score += leaf['leaf']
         path = [leaf]
         while 'parent' in path[-1]:
